@@ -96,6 +96,7 @@ class ChannelMetrics:
 
     def record_latency(self, latency):
         """
+        Jitter is the difference in latency between successive packets.
         Record latency sample and update jitter using EWMA, which 
         recursively updates the average with each new data point using the formula:
         J_new = J_old + (|D| - J_old) / 16
@@ -116,6 +117,9 @@ class ChannelMetrics:
 class GameNetAPI:
     """
     Wrapper around aioquic to provide simplified QUIC networking for reliable and unreliable channels.
+    - Reliable channel: Sent over QUIC streams. Ordered delivery, retransmission, 
+        and gap handling (out-of-order packets are buffered for up to value defined in self._rel_skip_timeout).
+    - Unreliable channel: Sent over QUIC datagrams. No ordering or retransmission.
 
     Usage flow (server):
     api = GameNetAPI(is_server=True, host, port)
@@ -437,6 +441,7 @@ class GameNetAPI:
         2. Feeds inbound to quic.receive_datagram().
         3. Drains all quic.next_event() calls to _handle_event().
         4. Sends any pending outbound with _flush_packets().
+        5. Calls _maybe_skip_reliable_gap() to handle reliable packet gaps.
 
         Args:
             timeout: Time in seconds to wait for incoming data.
@@ -488,7 +493,7 @@ class GameNetAPI:
 
         Decides what to do based on event type (handshake complete, stream data received, datagram received, connection terminated).
         - If is handshake complete, sets flag, starts timer.
-        - If is stream data received, buffers data and calls _handle_received_data() when end_stream is reached.
+        - If is stream data received, buffers data and calls _handle_received_data() when end_stream is reached. (this assumes one msg per stream)
         - If is datagram received, calls _handle_received_data() directly.
         - If is connection terminated, logs the reason.
 
@@ -542,7 +547,7 @@ class GameNetAPI:
                 self._seen_rel_seqs.add(packet.seq_no)
                 self._reliable_receive(packet, latency)
             else:
-                self._unreliable_receive(packet, latency)
+                self._deliver_unreliable_to_app(packet, latency)
 
         except Exception as e:
             self.logger.error(f"Error handling data: {e}")
@@ -552,60 +557,89 @@ class GameNetAPI:
         Enforce in order delivery for reliable packets.
         If there is a gap, buffer out of order packets and start a 200 ms timer.
         When the timer expires, skip the missing seq and release buffered packets.
+
+        Args:
+            packet: Received Packet object.
+            latency: Measured latency in seconds.
+
+        Returns:
+            None
         """
         seq = packet.seq_no
 
-        # Fast path, exactly the expected seq
+        # If exactly the expected seq
         if seq == self._rel_expected_seq:
-            self._deliver_reliable(packet, latency)
+            self._deliver_reliable_to_app(packet, latency)
             self._rel_expected_seq += 1
 
             # Release any buffered contiguous packets
             while self._rel_expected_seq in self._rel_buffer:
                 pkt = self._rel_buffer.pop(self._rel_expected_seq)
                 lat = time.time() - pkt.timestamp
-                self._deliver_reliable(pkt, lat)
+                self._deliver_reliable_to_app(pkt, lat)
                 self._rel_expected_seq += 1
 
             # No gap remains
             self._rel_gap_deadline = None
             return
 
-        # Duplicate or late, already delivered
+        # If seq less than expected, duplicate or late packet - discard
         if seq < self._rel_expected_seq:
             return
 
-        # Out of order, buffer it
+        # If seq greater than expected, buffer it
         self._rel_buffer[seq] = packet
 
         # If this is the first time we discover a gap, start the 200 ms deadline
         if self._rel_gap_deadline is None:
             self._rel_gap_deadline = time.perf_counter() + self._rel_skip_timeout
 
-    def _deliver_reliable(self, packet: Packet, latency: float) -> None:
+    def _deliver_reliable_to_app(self, packet: Packet, latency: float) -> None:
         """
         Update reliable metrics and forward to application callback.
-        Called only when delivering in order or after a skip has advanced expected seq.
+        Called when a reliable packet is ready to be delivered to the application layer, 
+        when it is in order, or when a gap is skipped.
+
+        Args:
+            packet: Packet to deliver.
+            latency: Measured latency in seconds.
+        Returns:
+            None
         """
+        # Update reliable metrics
         self.reliable_metrics.packets_received += 1
         self.reliable_metrics.bytes_received += HEADER_LEN + len(packet.payload)
         self.reliable_metrics.record_latency(latency)
+
+        # Deliver to application
         self._deliver_packet(packet, latency)
 
-    def _unreliable_receive(self, packet: Packet, latency: float) -> None:
+    def _deliver_unreliable_to_app(self, packet: Packet, latency: float) -> None:
         """
-        Unreliable packets are independent
         Update unreliable metrics and forward to application callback.
+        Called when an unreliable packet is received, no need to check order.
+
+        Args:
+            packet: Received Packet object.
+            latency: Measured latency in seconds.
+        Returns:
+            None
         """
+        # Update unreliable metrics
         self.unreliable_metrics.packets_received += 1
         self.unreliable_metrics.bytes_received += HEADER_LEN + len(packet.payload)
         self.unreliable_metrics.record_latency(latency)
+
+        # Deliver to application
         self._deliver_packet(packet, latency)
 
     def _maybe_skip_reliable_gap(self) -> None:
         """
         If we are waiting on a missing reliable seq and its deadline has passed,
         mark it skipped and release any buffered packets that now become in order.
+        This ensures that ordering is maintained, while preventing indefinite blocking on lost packets.
+        There is no HOL blocking as each packet uses its own QUIC stream.
+
         """
         if self._rel_gap_deadline is None:
             return
@@ -623,7 +657,7 @@ class GameNetAPI:
         while self._rel_expected_seq in self._rel_buffer:
             pkt = self._rel_buffer.pop(self._rel_expected_seq)
             lat = time.time() - pkt.timestamp
-            self._deliver_reliable(pkt, lat)
+            self._deliver_reliable_to_app(pkt, lat)
             self._rel_expected_seq += 1
 
         # If a new gap remains with higher seq buffered, start another timer
@@ -635,6 +669,11 @@ class GameNetAPI:
     def _deliver_packet(self, packet: Packet, latency: float):
         """
         Deliver packet to application layer via callback.
+        This method is called when a packet (reliable or unreliable) is ready to be handed to the application layer.
+
+        Args:
+            packet: Packet to deliver.
+            latency: Measured latency in seconds.   
 
         """
         self.logger.info(
