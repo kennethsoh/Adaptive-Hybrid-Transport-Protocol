@@ -137,7 +137,7 @@ class GameNetAPI:
 
     Usage flow (client):
     api = GameNetAPI(is_server=False, host, port)
-    api.connect_to_server()
+    api.connect_to_server(server_host, server_port)
     api.set_deliver_callback(callback)
     api.send_reliable(payload) or api.send_unreliable(payload)
     api.process_events()
@@ -387,6 +387,10 @@ class GameNetAPI:
         """
         Connect to the QUIC server.
         Perform the QUIC handshake.
+
+        Args:
+            server_host: The hostname of the server.
+            server_port: The port number of the server.
 
         """
         # Set peer (server) address
