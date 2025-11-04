@@ -16,7 +16,7 @@ PORT = 5000
 WAIT_AFTER_SEND = 1.0
 
 # Server configurations
-SERVER_HOST = '127.0.0.1'
+SERVER_HOST = '192.168.68.99'
 SERVER_PORT = 5000
 
 # Logger setup
@@ -71,8 +71,9 @@ def main():
     while time.time() < t_end:
         api.process_events(timeout=0.1)
 
-    # Wait to ensure all packets are delivered before closing
-    time.sleep(120)
+    # Wait to ensure all (reliable) packets are delivered before closing
+    # Quic may need some time to retransmit lost packets
+    api.drain_events()
 
     api.report_results()
     api.close()

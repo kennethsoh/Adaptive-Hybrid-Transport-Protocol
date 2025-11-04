@@ -422,6 +422,18 @@ class GameNetAPI:
             self.logger.info("Handshake complete")
         else:
             raise TimeoutError("Handshake timed out")
+    
+    def drain_events(self, timeout=5.0):
+        """
+        Drain all pending events until there are no more reliable packets pending.
+        This method ensures that all reliable packets have been processed before proceeding.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not self.reliable_metrics.pending_reliable and self.quic.get_timer() is None:
+                break
+            self.process_events(timeout=0.1)
+            time.sleep(0.1)
 
     # ========================================================================
     # Core QUIC Event Loop Methods
