@@ -37,6 +37,8 @@ def main():
         print(f"An error occurred: {e}")
     finally:
         print("--- Final Metrics ---\n")
+
+
         api.report_results()
         api.close()
         print("Server closed. Exiting.")

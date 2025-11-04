@@ -787,7 +787,35 @@ class GameNetAPI:
         Compute and log all performance metrics after test duration.
         
         """
-        duration = self._elapsed if self._elapsed else 0
+        # duration = self._elapsed if self._elapsed else 0
+        # for label, m in [("RELIABLE", self.reliable_metrics),
+        #                  ("UNRELIABLE", self.unreliable_metrics)]:
+        #     avg_lat = (sum(m.latency_samples) / len(m.latency_samples)) if m.latency_samples else 0
+        #     throughput = m.bytes_received / duration if duration > 0 else 0
+        #     pdr = (m.packets_received / m.packets_sent * 100) if m.packets_sent else 0
+        #     self.logger.info(
+        #         f"\n=== {label} METRICS ===\n"
+        #         f"Packets Sent: {m.packets_sent}\n"
+        #         f"Packets Received: {m.packets_received}\n"
+        #         f"Retransmissions: {m.retransmissions}\n"
+        #         f"Throughput: {throughput:.2f} B/s\n"
+        #         f"PDR: {pdr:.2f}%\n"
+        #         f"Average Latency: {avg_lat*1000:.2f} ms\n"
+        #         f"Jitter: {m.jitter*1000:.2f} ms\n"
+        #     )
+
+        """
+        Compute and log all performance metrics after test duration.
+        
+        """
+        # Calculate duration: use actual elapsed time or time since start
+        if self._elapsed:
+            duration = self._elapsed
+        elif self._start_time:
+            duration = time.perf_counter() - self._start_time
+        else:
+            duration = 0
+        
         for label, m in [("RELIABLE", self.reliable_metrics),
                          ("UNRELIABLE", self.unreliable_metrics)]:
             avg_lat = (sum(m.latency_samples) / len(m.latency_samples)) if m.latency_samples else 0
@@ -795,6 +823,7 @@ class GameNetAPI:
             pdr = (m.packets_received / m.packets_sent * 100) if m.packets_sent else 0
             self.logger.info(
                 f"\n=== {label} METRICS ===\n"
+                f"Duration: {duration:.3f}s\n"  # ← Add this for visibility
                 f"Packets Sent: {m.packets_sent}\n"
                 f"Packets Received: {m.packets_received}\n"
                 f"Retransmissions: {m.retransmissions}\n"
