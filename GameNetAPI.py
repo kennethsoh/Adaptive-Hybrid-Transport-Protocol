@@ -88,13 +88,13 @@ class ChannelMetrics:
     packets_lost: int = 0
     bytes_sent: int = 0
     bytes_received: int = 0
-    retransmissions: int = 0
+    total_retransmissions: int = 0
+    unique_retransmissions: int = 0
     latency_samples: list = None
     jitter: float = 0.0
 
     # Reliable channel specific metrics
     pending_reliable: dict[int, float] = field(default_factory=dict)
-    skip_events: int = 0
     missed_packets: set[int] = field(default_factory=set)
     late_arrivals: set[int] = field(default_factory=set)
 
@@ -168,8 +168,9 @@ class GameNetAPI:
         self.peer_addr: Optional[Tuple[str, int]] = None
         self.config: Optional[QuicConfiguration] = None
 
-        # Initial sequence number = 0
-        self._next_seq = 0
+        # Initial sequence number = 0 for both channels
+        self._unrel_next_seq = 0
+        self._rel_next_seq = 0
 
         # next reliable seq to deliver
         self._rel_expected_seq = 0    
@@ -224,19 +225,34 @@ class GameNetAPI:
         """
         self._deliver_callback = callback
 
-    def _alloc_seq(self) -> int:
+    def _unrel_alloc_seq(self) -> int:
         """
-        Allocate a new sequence number.
+        Allocate a new sequence number for the unreliable channel.
 
         Returns:
             int: The allocated sequence number.
         """
-        sequence = self._next_seq
+        sequence = self._unrel_next_seq
 
         # Increment for next allocation
-        self._next_seq += 1
+        self._unrel_next_seq += 1
 
         return sequence
+
+    def _rel_alloc_seq(self) -> int:
+        """
+        Allocate a new sequence number for the unreliable channel.
+
+        Returns:
+            int: The allocated sequence number.
+        """
+        sequence = self._rel_next_seq
+
+        # Increment for next allocation
+        self._rel_next_seq += 1
+
+        return sequence
+
 
 
     # ========================================================================
@@ -740,7 +756,7 @@ class GameNetAPI:
             raise RuntimeError("Not connected")
 
         # Obtain a sequence number
-        seq = self._alloc_seq()
+        seq = self._rel_alloc_seq()
         self.reliable_metrics.pending_reliable[seq] = time.time()
 
         # Set the packet type to RELIABLE and create Packet object with timestamp and payload
@@ -784,7 +800,7 @@ class GameNetAPI:
             raise RuntimeError("Not connected")
         
         # Obtain a sequence number
-        seq = self._alloc_seq()
+        seq = self._unrel_alloc_seq()
 
         # Set the packet type to UNRELIABLE and create Packet object with timestamp and payload
         packet = Packet(ChannelType.UNRELIABLE, seq, time.time(), payload)
@@ -849,7 +865,8 @@ class GameNetAPI:
                     seen[key] = 1
 
         total_retrans = sum(retrans.values())
-        return retrans, total_retrans
+        unique_retrans = len(retrans)
+        return unique_retrans, total_retrans
 
 
     def report_results(self):
@@ -870,8 +887,9 @@ class GameNetAPI:
             import json
             json.dump(self.qlogger.to_dict(), f)
 
-        count_retrans, total_retrans = self.count_retransmissions_from_qlogger()
-        self.reliable_metrics.retransmissions = total_retrans
+        unique_retrans, total_retrans = self.count_retransmissions_from_qlogger()
+        self.reliable_metrics.total_retransmissions = total_retrans
+        self.reliable_metrics.unique_retransmissions = unique_retrans
 
         # Printing results
         role_label = "SENDER" if not self.is_server else "RECEIVER"
@@ -890,7 +908,8 @@ class GameNetAPI:
                 # SENDER view: show retransmissions
                 throughput = m.bytes_sent / duration if duration > 0 else 0
 
-                self.logger.info(f"Retransmissions: {m.retransmissions}")
+                self.logger.info(f"Total Retransmissions: {m.total_retransmissions}")
+                self.logger.info(f"Unique Retransmissions: {m.unique_retransmissions}")
             else:
                 # RECEIVER view: show app-layer delivery effects
                 throughput = m.bytes_received / duration if duration > 0 else 0
@@ -899,8 +918,6 @@ class GameNetAPI:
 
                 self.logger.info(f"Skipped (timed-out ({self._rel_skip_timeout * 1000}ms)): {len(m.missed_packets)}")
                 self.logger.info(f"Late Arrivals (useless): {len(m.late_arrivals)}")
-                self.logger.info(f"Skip Events (HoL gaps triggered): {(m.skip_events)}")
-
                 self.logger.info(f"PDR (App Pkt Delivery Ratio): {pdr:.2f}%")
                 self.logger.info(f"Average Latency: {avg_lat * 1000:.2f} ms")
                 self.logger.info(f"Jitter: {m.jitter * 1000:.2f} ms")
