@@ -4,7 +4,7 @@ import time
 import logging
 import json
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Callable, Dict, Any, Tuple
 
 import datetime
@@ -24,6 +24,7 @@ from aioquic.quic.events import (
     ConnectionTerminated,
     HandshakeCompleted,
 )
+from aioquic.quic.logger import QuicLogger
 from aioquic.quic.packet import pull_quic_header, QuicProtocolVersion
 from aioquic.buffer import Buffer
 
@@ -91,6 +92,12 @@ class ChannelMetrics:
     latency_samples: list = None
     jitter: float = 0.0
 
+    # Reliable channel specific metrics
+    pending_reliable: dict[int, float] = field(default_factory=dict)
+    skip_events: int = 0
+    missed_packets: set[int] = field(default_factory=set)
+    late_arrivals: set[int] = field(default_factory=set)
+
     def __post_init__(self):
         self.latency_samples = []
 
@@ -144,8 +151,8 @@ class GameNetAPI:
 
         Args:
             is_server: True if server, False if client
-            host: Host IP address to bind/connect
-            port: Port number to bind/connect
+            host: My Host IP address to bind/connect
+            port: My Port number to bind/connect
         
         """
         self.is_server = is_server
@@ -191,6 +198,7 @@ class GameNetAPI:
 
         # Logging 
         self.logger = logging.getLogger(f"H-QUIC-{'Server' if is_server else 'Client'}")
+        self.qlogger = QuicLogger()
 
         # Set handshake complete flag
         self.handshake_complete = False 
@@ -311,6 +319,7 @@ class GameNetAPI:
             is_client = False,
             alpn_protocols=["gamenet"],
             max_datagram_frame_size=65536,
+            quic_logger=self.qlogger
         )
 
         # Load TLS certificate and key
@@ -358,20 +367,21 @@ class GameNetAPI:
     # ========================================================================
     # Client Methods
     # ========================================================================
-    def connect_to_server(self):
+    def connect_to_server(self, server_host: str, server_port: int):
         """
         Connect to the QUIC server.
         Perform the QUIC handshake.
 
         """
         # Set peer (server) address
-        self.peer_addr = (self.host, self.port)
+        self.peer_addr = (server_host, server_port)
 
         # Create QUIC configuration object for client
         config = QuicConfiguration(
             is_client = True,
             alpn_protocols=["gamenet"],
             max_datagram_frame_size=65536,
+            quic_logger=self.qlogger
         )
         config.verify_mode = False  # skip certificate verification for self-signed certs
 
@@ -530,6 +540,7 @@ class GameNetAPI:
             self._elapsed = self._end_time - self._start_time if self._start_time else 0
             self.logger.info(f"Connection terminated (error={event.error_code}, reason={event.reason_phrase})")
 
+
     def _handle_received_data(self, data: bytes):
         """
         Parse one framed message and update metrics, then hand to the application.
@@ -606,10 +617,19 @@ class GameNetAPI:
         Returns:
             None
         """
+
+        if packet.seq_no in self.reliable_metrics.missed_packets:
+            self.logger.info(
+                f"[LATE-SKIPPED] {'RELIABLE' if packet.channel_type.value == 0 else 'UNRELIABLE'} seq={packet.seq_no} latency={latency*1000:.2f}ms "
+                f"jitter={self.reliable_metrics.jitter*1000:.2f}ms timestamp={packet.timestamp:.3f}"
+            )
+            return 
+
         # Update reliable metrics
         self.reliable_metrics.packets_received += 1
         self.reliable_metrics.bytes_received += HEADER_LEN + len(packet.payload)
         self.reliable_metrics.record_latency(latency)
+        self.reliable_metrics.pending_reliable.pop(packet.seq_no, None)
 
         # Deliver to application
         self._deliver_packet(packet, latency)
@@ -649,6 +669,10 @@ class GameNetAPI:
         missed = self._rel_expected_seq
         self.logger.info(f"[SKIP] RELIABLE seq={missed} after {int(self._rel_skip_timeout * 1000)} ms")
 
+        self.reliable_metrics.missed_packets.add(missed)
+        self.reliable_metrics.late_arrivals.add(missed)
+        self.reliable_metrics.pending_reliable.pop(missed, None)
+
         # Advance past the missing one
         self._rel_expected_seq += 1
         self._rel_gap_deadline = None
@@ -677,7 +701,7 @@ class GameNetAPI:
 
         """
         self.logger.info(
-            f"[DELIVER] {"RELIABLE" if packet.channel_type.value == 0 else "UNRELIABLE"} seq={packet.seq_no} latency={latency*1000:.2f}ms "
+            f"[DELIVER] {'RELIABLE' if packet.channel_type.value == 0 else 'UNRELIABLE'} seq={packet.seq_no} latency={latency*1000:.2f}ms "
             f"jitter={self.reliable_metrics.jitter*1000:.2f}ms timestamp={packet.timestamp:.3f}"
         )
         if self._deliver_callback:
@@ -717,6 +741,7 @@ class GameNetAPI:
 
         # Obtain a sequence number
         seq = self._alloc_seq()
+        self.reliable_metrics.pending_reliable[seq] = time.time()
 
         # Set the packet type to RELIABLE and create Packet object with timestamp and payload
         packet = Packet(ChannelType.RELIABLE, seq, time.time(), payload)
@@ -782,28 +807,52 @@ class GameNetAPI:
     # ========================================================================
     # Metrics Reporting
     # ========================================================================
-    def report_results(self):
-        """
-        Compute and log all performance metrics after test duration.
-        
-        """
-        # duration = self._elapsed if self._elapsed else 0
-        # for label, m in [("RELIABLE", self.reliable_metrics),
-        #                  ("UNRELIABLE", self.unreliable_metrics)]:
-        #     avg_lat = (sum(m.latency_samples) / len(m.latency_samples)) if m.latency_samples else 0
-        #     throughput = m.bytes_received / duration if duration > 0 else 0
-        #     pdr = (m.packets_received / m.packets_sent * 100) if m.packets_sent else 0
-        #     self.logger.info(
-        #         f"\n=== {label} METRICS ===\n"
-        #         f"Packets Sent: {m.packets_sent}\n"
-        #         f"Packets Received: {m.packets_received}\n"
-        #         f"Retransmissions: {m.retransmissions}\n"
-        #         f"Throughput: {throughput:.2f} B/s\n"
-        #         f"PDR: {pdr:.2f}%\n"
-        #         f"Average Latency: {avg_lat*1000:.2f} ms\n"
-        #         f"Jitter: {m.jitter*1000:.2f} ms\n"
-        #     )
 
+    def count_retransmissions_from_qlogger(self):
+        qlog_dict = self.qlogger.to_dict()
+        traces = qlog_dict.get("traces", [])
+        if not traces:
+            return {}, 0
+
+        events = traces[0].get("events", [])
+
+        seen = {}
+        retrans = {}
+
+        for ev in events:
+            # only packet_sent events
+            if ev.get("name") != "transport:packet_sent":
+                continue
+
+            data = ev.get("data", {})
+            header = data.get("header", {})
+
+            # only 1RTT packets
+            if header.get("packet_type") != "1RTT":
+                continue
+
+            # look for stream frames only
+            for fr in data.get("frames", []):
+                if fr.get("frame_type") != "stream":
+                    continue
+
+                stream_id = fr["stream_id"]
+                offset = fr.get("offset")
+                length = fr.get("length")
+
+                key = (stream_id, offset, length)
+
+                if key in seen:
+                    # increments retrans count
+                    retrans[key] = retrans.get(key, 0) + 1
+                else:
+                    seen[key] = 1
+
+        total_retrans = sum(retrans.values())
+        return retrans, total_retrans
+
+
+    def report_results(self):
         """
         Compute and log all performance metrics after test duration.
         
@@ -815,23 +864,48 @@ class GameNetAPI:
             duration = time.perf_counter() - self._start_time
         else:
             duration = 0
+
+        # Save qlog to file for offline analysis
+        with open(f"{'receiver' if self.is_server else 'sender'}.qlog", "w") as f:
+            import json
+            json.dump(self.qlogger.to_dict(), f)
+
+        count_retrans, total_retrans = self.count_retransmissions_from_qlogger()
+        self.reliable_metrics.retransmissions = total_retrans
+
+        # Printing results
+        role_label = "SENDER" if not self.is_server else "RECEIVER"
+        self.logger.info(f"\n================ {role_label} METRICS ================ \n")
+        self.logger.info(f"Duration: {duration:.3f}s")
         
-        for label, m in [("RELIABLE", self.reliable_metrics),
-                         ("UNRELIABLE", self.unreliable_metrics)]:
+        for label, m in [("RELIABLE", self.reliable_metrics), ("UNRELIABLE", self.unreliable_metrics)]:
+
             avg_lat = (sum(m.latency_samples) / len(m.latency_samples)) if m.latency_samples else 0
-            throughput = m.bytes_received / duration if duration > 0 else 0
-            pdr = (m.packets_received / m.packets_sent * 100) if m.packets_sent else 0
-            self.logger.info(
-                f"\n=== {label} METRICS ===\n"
-                f"Duration: {duration:.3f}s\n"  # ← Add this for visibility
-                f"Packets Sent: {m.packets_sent}\n"
-                f"Packets Received: {m.packets_received}\n"
-                f"Retransmissions: {m.retransmissions}\n"
-                f"Throughput: {throughput:.2f} B/s\n"
-                f"PDR: {pdr:.2f}%\n"
-                f"Average Latency: {avg_lat*1000:.2f} ms\n"
-                f"Jitter: {m.jitter*1000:.2f} ms\n"
-            )
+
+            self.logger.info(f"\n--- {label} CHANNEL ---")
+            self.logger.info(f"Packets Sent: {m.packets_sent}")
+            self.logger.info(f"Packets Received (in-time): {m.packets_received}")
+            
+            if not self.is_server:
+                # SENDER view: show retransmissions
+                throughput = m.bytes_sent / duration if duration > 0 else 0
+
+                self.logger.info(f"Retransmissions: {m.retransmissions}")
+            else:
+                # RECEIVER view: show app-layer delivery effects
+                throughput = m.bytes_received / duration if duration > 0 else 0
+                total_expected = (m.packets_received + len(m.missed_packets))
+                pdr = (m.packets_received / total_expected * 100) if total_expected > 0 else 0
+
+                self.logger.info(f"Skipped (timed-out ({self._rel_skip_timeout * 1000}ms)): {len(m.missed_packets)}")
+                self.logger.info(f"Late Arrivals (useless): {len(m.late_arrivals)}")
+                self.logger.info(f"Skip Events (HoL gaps triggered): {(m.skip_events)}")
+
+                self.logger.info(f"PDR (App Pkt Delivery Ratio): {pdr:.2f}%")
+                self.logger.info(f"Average Latency: {avg_lat * 1000:.2f} ms")
+                self.logger.info(f"Jitter: {m.jitter * 1000:.2f} ms")
+
+            self.logger.info(f"Throughput: {throughput:.2f} B/s\n")
 
     def close(self):
         """
