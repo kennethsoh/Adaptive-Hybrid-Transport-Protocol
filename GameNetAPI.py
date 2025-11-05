@@ -96,7 +96,6 @@ class ChannelMetrics:
     # Reliable channel specific metrics
     pending_reliable: dict[int, float] = field(default_factory=dict)
     missed_packets: set[int] = field(default_factory=set)
-    late_arrivals: set[int] = field(default_factory=set)
 
     def __post_init__(self):
         self.latency_samples = []
@@ -427,6 +426,9 @@ class GameNetAPI:
         """
         Drain all pending events until there are no more reliable packets pending.
         This method ensures that all reliable packets have been processed before proceeding.
+        Adds a timeout to prevent indefinite blocking.
+        Args:
+            timeout: Maximum time to wait (seconds)
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -649,7 +651,6 @@ class GameNetAPI:
         Returns:
             None
         """
-
         try:
             # Unique Stats Packet from Sender
             stats = json.loads(packet.payload.decode('utf-8'))
@@ -712,7 +713,6 @@ class GameNetAPI:
         self.logger.info(f"[SKIP] RELIABLE seq={missed} after {int(self._rel_skip_timeout * 1000)} ms")
 
         self.reliable_metrics.missed_packets.add(missed)
-        self.reliable_metrics.late_arrivals.add(missed)
         self.reliable_metrics.pending_reliable.pop(missed, None)
 
         # Advance past the missing one
@@ -851,6 +851,16 @@ class GameNetAPI:
     # ========================================================================
 
     def count_retransmissions_from_qlogger(self):
+        """
+        Count retransmissions from the Quic-Logger (QLOG) data.
+        This is done by parsing the QLOG traces for "transport:packet_sent" events,
+        looking for stream frames, and checking for duplicate (stream_id, offset, length) tuples.
+        A duplicate indicates a retransmission.
+
+        Returns:
+            unique_retrans: Number of unique retransmitted stream frames.
+            total_retrans: Total number of retransmissions (including duplicates).
+        """
         qlog_dict = self.qlogger.to_dict()
         traces = qlog_dict.get("traces", [])
         if not traces:
@@ -892,7 +902,7 @@ class GameNetAPI:
 
         total_retrans = sum(retrans.values())
         unique_retrans = len(retrans)
-        return unique_retrans, total_retrans, retrans
+        return unique_retrans, total_retrans
 
 
     def report_results(self):
@@ -916,6 +926,7 @@ class GameNetAPI:
         unique_retrans, total_retrans, retrans_dict = self.count_retransmissions_from_qlogger()
         self.reliable_metrics.total_retransmissions = total_retrans
         self.reliable_metrics.unique_retransmissions = unique_retrans
+
         formatted_retrans = {
             f"Stream {key[0]}": count
             for key, count in retrans_dict.items()
@@ -924,21 +935,22 @@ class GameNetAPI:
         # Printing results
         role_label = "SENDER" if not self.is_server else "RECEIVER"
         self.logger.info(f"\n================ {role_label} METRICS ================ \n")
-        self.logger.info(f"Duration: {duration:.3f}s")
+        self.logger.info(f"Duration: {duration:.3f}s\n")
         
         for label, m in [("RELIABLE", self.reliable_metrics), ("UNRELIABLE", self.unreliable_metrics)]:
 
             avg_lat = (sum(m.latency_samples) / len(m.latency_samples)) if m.latency_samples else 0
 
-            self.logger.info(f"\n--- {label} CHANNEL ---")
-            self.logger.info(f"Packets Sent: {m.packets_sent}")
-            self.logger.info(f"Packets Received (in-time): {m.packets_received}")
+            self.logger.info(f"--- {label} CHANNEL ---")
+            if role_label == "SENDER":
+                self.logger.info(f"Packets Sent: {m.packets_sent}")
+            elif role_label == "RECEIVER":
+                self.logger.info(f"Packets Received (in-time): {m.packets_received}")
             
             if not self.is_server:
                 # SENDER view: show retransmissions
                 throughput = m.bytes_sent / duration if duration > 0 else 0
-
-                if label == "RELIABLE":            
+                if label == "RELIABLE":
                     self.logger.info(f"Total Retransmissions: {m.total_retransmissions}")
                     self.logger.info(f"Unique Retransmissions: {m.unique_retransmissions}")
                     if formatted_retrans:
@@ -951,8 +963,8 @@ class GameNetAPI:
                 if label == "RELIABLE":
                     total_expected = (m.packets_received + len(m.missed_packets))
                 else:
-                    # Unreliable
-                    total_expected = m.packets_sent
+                    # Unreliable - If not Default to the Unfixed PDR calculation
+                    total_expected = m.packets_sent if m.packets_sent > 0 else (m.packets_received + len(m.missed_packets))
 
                 pdr = (m.packets_received / total_expected * 100) if total_expected > 0 else 0
 
@@ -969,6 +981,7 @@ class GameNetAPI:
     def close(self):
         """
         Close the UDP socket and QUIC connection.
+        This method should not be called before report_results() to ensure all metrics are captured.
         """
         if self.quic:
             self.quic.close()
