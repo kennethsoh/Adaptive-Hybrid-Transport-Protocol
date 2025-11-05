@@ -902,7 +902,7 @@ class GameNetAPI:
 
         total_retrans = sum(retrans.values())
         unique_retrans = len(retrans)
-        return unique_retrans, total_retrans
+        return unique_retrans, total_retrans, retrans
 
 
     def report_results(self):
@@ -928,7 +928,7 @@ class GameNetAPI:
         self.reliable_metrics.unique_retransmissions = unique_retrans
 
         formatted_retrans = {
-            f"Stream {key[0]}": count
+            f"msg {int(key[0]/4)}": count
             for key, count in retrans_dict.items()
         }
 
@@ -954,7 +954,7 @@ class GameNetAPI:
                     self.logger.info(f"Total Retransmissions: {m.total_retransmissions}")
                     self.logger.info(f"Unique Retransmissions: {m.unique_retransmissions}")
                     if formatted_retrans:
-                        self.logger.info(f"Retransmissions Breakdown by Stream: {formatted_retrans}")
+                        self.logger.info(f"Retransmissions Breakdown: {formatted_retrans}")
             else:
                 # RECEIVER view: show app-layer delivery effects
                 throughput = m.bytes_received / duration if duration > 0 else 0
@@ -970,7 +970,6 @@ class GameNetAPI:
 
                 if label == "RELIABLE":
                     self.logger.info(f"Skipped (timed-out ({self._rel_skip_timeout * 1000}ms)): {len(m.missed_packets)}")
-                    self.logger.info(f"Late Arrivals (useless): {len(m.late_arrivals)}")
                 
                 self.logger.info(f"PDR (App Pkt Delivery Ratio): {pdr:.2f}%")
                 self.logger.info(f"Average Latency: {avg_lat * 1000:.2f} ms")
