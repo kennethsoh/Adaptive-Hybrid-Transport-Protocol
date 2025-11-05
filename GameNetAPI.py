@@ -651,6 +651,15 @@ class GameNetAPI:
         Returns:
             None
         """
+        try:
+            # Unique Stats Packet from Sender
+            stats = json.loads(packet.payload.decode('utf-8'))
+            if isinstance(stats, dict) and "total_unreliable_sent" in stats:
+                count = int(stats["total_unreliable_sent"])
+                self.unreliable_metrics.packets_sent = count
+                self.logger.info(f"[STATS] Received Unreliable Sender stats: total_unreliable_sent={count}")
+        except Exception:
+            pass
 
         if packet.seq_no in self.reliable_metrics.missed_packets:
             self.logger.info(
@@ -914,9 +923,14 @@ class GameNetAPI:
             import json
             json.dump(self.qlogger.to_dict(), f)
 
-        unique_retrans, total_retrans = self.count_retransmissions_from_qlogger()
+        unique_retrans, total_retrans, retrans_dict = self.count_retransmissions_from_qlogger()
         self.reliable_metrics.total_retransmissions = total_retrans
         self.reliable_metrics.unique_retransmissions = unique_retrans
+
+        formatted_retrans = {
+            f"Stream {key[0]}": count
+            for key, count in retrans_dict.items()
+        }
 
         # Printing results
         role_label = "SENDER" if not self.is_server else "RECEIVER"
@@ -939,15 +953,26 @@ class GameNetAPI:
                 if label == "RELIABLE":
                     self.logger.info(f"Total Retransmissions: {m.total_retransmissions}")
                     self.logger.info(f"Unique Retransmissions: {m.unique_retransmissions}")
+                    if formatted_retrans:
+                        self.logger.info(f"Retransmissions Breakdown by Stream: {formatted_retrans}")
             else:
                 # RECEIVER view: show app-layer delivery effects
                 throughput = m.bytes_received / duration if duration > 0 else 0
-                total_expected = (m.packets_received + len(m.missed_packets))
+
+                total_expected = 0
+                if label == "RELIABLE":
+                    total_expected = (m.packets_received + len(m.missed_packets))
+                else:
+                    # Unreliable - If not Default to the Unfixed PDR calculation
+                    total_expected = m.packets_sent if m.packets_sent > 0 else (m.packets_received + len(m.missed_packets))
+
                 pdr = (m.packets_received / total_expected * 100) if total_expected > 0 else 0
 
-                self.logger.info(f"Skipped (timed-out ({self._rel_skip_timeout * 1000}ms)): {len(m.missed_packets)}")
                 if label == "RELIABLE":
-                    self.logger.info(f"PDR (App Pkt Delivery Ratio): {pdr:.2f}%")
+                    self.logger.info(f"Skipped (timed-out ({self._rel_skip_timeout * 1000}ms)): {len(m.missed_packets)}")
+                    self.logger.info(f"Late Arrivals (useless): {len(m.late_arrivals)}")
+                
+                self.logger.info(f"PDR (App Pkt Delivery Ratio): {pdr:.2f}%")
                 self.logger.info(f"Average Latency: {avg_lat * 1000:.2f} ms")
                 self.logger.info(f"Jitter: {m.jitter * 1000:.2f} ms")
 

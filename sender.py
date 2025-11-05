@@ -7,6 +7,7 @@ Sender.py
 import logging
 import random
 import time
+import json
 from datetime import datetime
 from GameNetAPI import GameNetAPI
 
@@ -49,6 +50,9 @@ def main():
     # Send between 40 and 50 messages
     random_number = random.randint(40, 50)
 
+    # Counter for Total Unreliable Messages Sent
+    total_unreliable_sent = 0
+
     time.sleep(5)
     for i in range(random_number):
         LOGGER.info("Preparing to send message %d/%d", i + 1, random_number)
@@ -64,8 +68,13 @@ def main():
         else:
             LOGGER.info("[Send] Preparing (unreliable) message %r", message)
             api.send_unreliable(data)
+            total_unreliable_sent += 1
             LOGGER.info("[Send] Message sent at time %s\n", datetime.now().strftime("%H:%M:%S"))
             time.sleep(0.1)
+
+    LOGGER.info("All messages sent. Sending Final Reliable Stats Package...")
+    stats_payload = json.dumps({"total_unreliable_sent": total_unreliable_sent})
+    api.send_reliable(stats_payload.encode('utf-8'))
 
     t_end = time.time() + WAIT_AFTER_SEND
     while time.time() < t_end:
