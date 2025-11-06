@@ -9,6 +9,7 @@ from typing import Optional, Callable, Dict, Any, Tuple
 
 import datetime
 import ipaddress
+import matplotlib.pyplot as plt
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.backends import default_backend
@@ -976,6 +977,37 @@ class GameNetAPI:
                 self.logger.info(f"Jitter: {m.jitter * 1000:.2f} ms")
 
             self.logger.info(f"Throughput: {throughput:.2f} B/s\n")
+        
+        if self.is_server:
+            try:
+                self.logger.info("Generating latency histogram...")
+                plt.figure(figsize=(14, 8))
+
+                rel_lat_ms = [s * 1000 for s in self.reliable_metrics.latency_samples]
+                if rel_lat_ms:
+                    plt.plot(range(len(rel_lat_ms)), rel_lat_ms, label='Reliable Latency (ms)', color='blue', alpha=0.7, marker='o', markersize=4, linestyle='-')
+                
+                unrel_lat_ms = [s * 1000 for s in self.unreliable_metrics.latency_samples]
+                if unrel_lat_ms:
+                    plt.plot(range(len(unrel_lat_ms)), unrel_lat_ms, label='Unreliable Latency (ms)', color='magenta', alpha=0.7, marker='o', markersize=4, linestyle='--')
+
+                plt.title('Packet Latency Over Time (Receiver)', fontsize=16)
+                plt.xlabel('Packet Received Index', fontsize=14)
+                plt.ylabel('Latency (ms)', fontsize=14)
+
+                if rel_lat_ms or unrel_lat_ms:
+                    plt.legend()
+
+                plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+                plt.tight_layout()
+
+                plot_filename = "receiver_latency_plot.png"
+                plt.savefig(plot_filename)
+                plt.close()
+
+                self.logger.info(f"Latency histogram saved to {plot_filename}")
+            except Exception as e:
+                self.logger.error(f"Error reporting results: {e}")
 
     def close(self):
         """
