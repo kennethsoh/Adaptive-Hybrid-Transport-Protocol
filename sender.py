@@ -47,20 +47,26 @@ def main():
     api = GameNetAPI(is_server=False, host=HOST, port=PORT)
     api.connect_to_server(SERVER_HOST, SERVER_PORT)
 
-    # Send between 40 and 50 messages
-    random_number = random.randint(40, 50)
+    # Send 30 Reliable and Unreliable Messages
+    NUM_RELIABLE = 30
+    NUM_UNRELIABLE = 30
+
+    # Shuffle the order of reliable and unreliable sends
+    send_tasks = (['reliable'] * NUM_RELIABLE) + (['unreliable'] * NUM_UNRELIABLE)
+    random.shuffle(send_tasks)
+    total_packets = len(send_tasks)
 
     # Counter for Total Unreliable Messages Sent
     total_unreliable_sent = 0
 
     time.sleep(5)
-    for i in range(random_number):
-        LOGGER.info("Preparing to send message %d/%d", i + 1, random_number)
+    for i, task_type in enumerate(send_tasks):
+        LOGGER.info("Preparing to send message %d/%d", i + 1, total_packets)
         message = generate_sentences()
         data = message.encode('utf-8')
 
         # Randomly decide to send reliably or unreliably
-        if random.random() < 0.5:
+        if task_type == 'reliable':
             LOGGER.info("[Send] Preparing (reliable) message: %r", message)
             api.send_reliable(data)
             LOGGER.info("[Send] Message sent at time %s\n", datetime.now().strftime("%H:%M:%S"))
